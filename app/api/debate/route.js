@@ -142,7 +142,7 @@ export async function POST(req) {
   //   所以只对 MiniMax 的长发言类环节（allowLong），单独加一条"精简硬要求"，把输出压到一两句，
   //   让它像"谁是卧底"那样快速答完、赶在边缘超时前返回。短输出环节不加（本来就好使）。
   if (isMiniMax && allowLong && sys) {
-    sys += '\n\n【输出精简硬要求】这段发言务必简短有力：最多 2-3 句话，直奔核心观点、给一个最有冲击力的点，不要长篇铺垫、不要逐条罗列、不要复述别人的话。短而锋利即可。';
+    sys += '\n\n【MiniMax 专属·硬要求】请直接输出你要当众说的那段话本身，绝对不要输出任何思考过程、分析、或"让我想想/首先"之类的铺垫。务必简短锋利：1-2 句话，只抛最有冲击力的一个点。';
   }
 
   // 组装 OpenAI 兼容请求
@@ -245,10 +245,15 @@ export async function POST(req) {
         usedReasoning = true;
       }
       text = stripReasoning(text, allowLong);
-      // 从 reasoning_content 兜底、且本就要求简短（刀/验/投票）时，只取结论那一行
-      if (usedReasoning && !allowLong && text) {
+      // 从 reasoning_content 兜底时，把"成稿"从思考里捞出来（思考模型常把最终发言放在末尾）
+      if (usedReasoning && text) {
+        const mk = text.match(/(?:最终发言|我的发言|我会说|我要说|陈词|发言|结论|回答|观点)[：:]\s*([\s\S]+)$/);
+        if (mk && mk[1].trim().length > 4) text = mk[1].trim();
         const lines = text.split(/\n+/).map(s => s.trim()).filter(Boolean);
-        if (lines.length) text = lines[lines.length - 1];
+        if (lines.length) {
+          // 简短环节只留最后一句；长发言留末尾 1-2 句（MiniMax 已被要求只说 1-2 句）
+          text = allowLong ? lines.slice(-2).join(' ') : lines[lines.length - 1];
+        }
       }
 
       if (text) return { text, displayName: cfg.displayName, model: cfg.model };
