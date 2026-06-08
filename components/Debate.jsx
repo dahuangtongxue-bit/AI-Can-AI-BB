@@ -87,6 +87,7 @@ export default function Debate() {
   const [audience, setAudience] = useState({ initial: null, final: null }); // {pos,neg,reason}
   const [statements, setStatements] = useState([]); // 立论 [{side,pos,modelIndex,text}]
   const [clash, setClash] = useState([]); // 开杠 [{side,pos,modelIndex,text}]
+  const [bicker, setBicker] = useState([]); // 抬杠·全员混战 [{side,pos,modelIndex,text}]
   const [closings, setClosings] = useState([]); // 结辩 [{side,pos,modelIndex,text,isLast}]
   const [mentorComments, setMentorComments] = useState([]); // [{modelIndex,text}]
   const [winner, setWinner] = useState(''); // pos|neg|tie
@@ -170,13 +171,13 @@ export default function Debate() {
     abortRef.current = false; savedRef.current = false;
     setDebaters(ds); setMentors(mts); setEvaluatorIdx(evalIdx);
     setAudience({ initial: null, final: null });
-    setStatements([]); setClash([]); setClosings([]); setMentorComments([]);
+    setStatements([]); setClash([]); setBicker([]); setClosings([]); setMentorComments([]);
     setWinner(''); setMvp(null); setError(''); setPhase('');
     setStage('playing');
     setTimeout(() => runDebate(ds, curTopic, mts, evalIdx), 300);
   };
 
-  const finalize = (result, mvpInfo, curTopic, ds, aud, stmts, cl, clo, mc) => {
+  const finalize = (result, mvpInfo, curTopic, ds, aud, stmts, cl, bk, clo, mc) => {
     setWinner(result); setMvp(mvpInfo); setStage('ended'); setRunning(false); setPhase('');
     if (!savedRef.current) {
       savedRef.current = true;
@@ -185,7 +186,7 @@ export default function Debate() {
         topic: curTopic,
         debaters: ds.map(d => ({ id: d.id, modelIndex: d.modelIndex, modelName: slotName(d.modelIndex), side: d.side, pos: d.pos, avatar: d.avatar })),
         mentors: mc.map(m => ({ modelIndex: m.modelIndex, modelName: slotName(m.modelIndex), text: m.text })),
-        audience: aud, statements: stmts, clash: cl, closings: clo,
+        audience: aud, statements: stmts, clash: cl, bicker: bk, closings: clo,
         winner: result, mvp: mvpInfo,
       });
       setHistory(loadHistory());
@@ -246,6 +247,22 @@ export default function Debate() {
     }
     setActiveKey(null);
 
+    // ===== 3.5 抬杠（全员混战，一轮短兵、火力全开）=====
+    setPhase('bicker'); setActiveKey(null);
+    await sleep(450);
+    const bickerOrder = [];
+    for (let p = 1; p <= 3; p++) { bickerOrder.push(find('pos', p)); bickerOrder.push(find('neg', p)); }
+    let bk = [];
+    for (const d of bickerOrder) {
+      if (abortRef.current) { setRunning(false); return; }
+      setActiveKey(d.modelIndex);
+      try {
+        const text = await callModel(d.modelIndex, buildBickerSystem(d, curTopic), buildBickerUser(d, curTopic, stmts, cl, bk), 120, false);
+        if (cleanText(text)) { bk = [...bk, { side: d.side, pos: d.pos, modelIndex: d.modelIndex, text: cleanText(text) }]; setBicker([...bk]); }
+      } catch (e) { /* 抬杠某句失败则跳过 */ }
+    }
+    setActiveKey(null);
+
     // ===== 4. 结辩（领先方先、落后方后结辩）=====
     setPhase('closing');
     await sleep(400);
@@ -257,7 +274,7 @@ export default function Debate() {
       if (abortRef.current) { setRunning(false); return; }
       setActiveKey(d.modelIndex);
       try {
-        const text = await callModel(d.modelIndex, buildClosingSystem(d, curTopic, isLast), buildClosingUser(d, curTopic, stmts, cl, clo), 340, true);
+        const text = await callModel(d.modelIndex, buildClosingSystem(d, curTopic, isLast), buildClosingUser(d, curTopic, stmts, cl, bk, clo), 340, true);
         clo = [...clo, { side: d.side, pos: d.pos, modelIndex: d.modelIndex, text: cleanText(text), isLast }];
         setClosings([...clo]);
       } catch (e) { setError(e.message); setRunning(false); setActiveKey(null); return; }
@@ -272,7 +289,7 @@ export default function Debate() {
       if (abortRef.current) { setRunning(false); return; }
       setActiveKey(mi);
       try {
-        const text = await callModel(mi, buildMentorSystem(mi, curTopic), buildMentorUser(curTopic, stmts, cl, clo), 260, true);
+        const text = await callModel(mi, buildMentorSystem(mi, curTopic), buildMentorUser(curTopic, stmts, cl, bk, clo), 260, true);
         if (cleanText(text)) { mc = [...mc, { modelIndex: mi, text: cleanText(text) }]; setMentorComments([...mc]); }
       } catch (e) { /* 导师失败跳过 */ }
     }
@@ -283,7 +300,7 @@ export default function Debate() {
     await sleep(400);
     let mvpInfo = null;
     try {
-      const raw = await callModel(evalIdx, buildAudiencePostSystem(curTopic), buildAudiencePostUser(curTopic, aud.initial, stmts, cl, clo), 320, false);
+      const raw = await callModel(evalIdx, buildAudiencePostSystem(curTopic), buildAudiencePostUser(curTopic, aud.initial, stmts, cl, bk, clo), 320, false);
       const rawPost = parseVoteSplit(raw);
       const swing = rawPost.pos - aud.initial._raw;
       const fp = Math.max(2, Math.min(98, aud.initial.pos + swing));
@@ -295,7 +312,7 @@ export default function Debate() {
     setAudience({ ...aud });
 
     const result = aud.final.pos > aud.initial.pos ? 'pos' : aud.final.pos < aud.initial.pos ? 'neg' : 'tie';
-    finalize(result, mvpInfo, curTopic, ds, aud, stmts, cl, clo, mc);
+    finalize(result, mvpInfo, curTopic, ds, aud, stmts, cl, bk, clo, mc);
   };
 
   const stopDebate = () => { abortRef.current = true; setRunning(false); };
@@ -303,7 +320,7 @@ export default function Debate() {
     abortRef.current = true;
     setStage('setup'); setDebaters([]); setMentors([]); setEvaluatorIdx(null);
     setPhase(''); setActiveKey(null); setAudience({ initial: null, final: null });
-    setStatements([]); setClash([]); setClosings([]); setMentorComments([]);
+    setStatements([]); setClash([]); setBicker([]); setClosings([]); setMentorComments([]);
     setWinner(''); setMvp(null); setError(''); setRunning(false);
   };
   const rerun = () => { rollTopic(); setCustomMode(false); reset(); };
@@ -507,9 +524,17 @@ export default function Debate() {
             </SectionCard>
           )}
 
+          {/* 抬杠·全员混战 */}
+          {(bicker.length > 0 || phase === 'bicker') && (
+            <SectionCard icon={<Flame className="w-3.5 h-3.5" />} title="抬杠 · 全员混战" tone="orange">
+              {bicker.map((s, i) => <SpeechRow key={i} s={s} debaters={debaters} compact />)}
+              {phase === 'bicker' && activeKey != null && <Speaking who={debaters.find(d => d.modelIndex === activeKey)} verb="开火中" />}
+            </SectionCard>
+          )}
+
           {/* 结辩 */}
           {(closings.length > 0 || phase === 'closing') && (
-            <SectionCard icon={<Flame className="w-3.5 h-3.5" />} title="结辩" tone="amber">
+            <SectionCard icon={<Quote className="w-3.5 h-3.5" />} title="结辩" tone="amber">
               {closings.map((s, i) => <SpeechRow key={i} s={s} debaters={debaters} closing />)}
               {phase === 'closing' && activeKey != null && <Speaking who={debaters.find(d => d.modelIndex === activeKey)} verb="结辩中" />}
             </SectionCard>
@@ -593,6 +618,7 @@ function SectionCard({ icon, title, tone, children }) {
   const tones = {
     slate: 'bg-slate-100 text-slate-600 border-slate-200',
     fuchsia: 'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-100',
+    orange: 'bg-orange-50 text-orange-700 border-orange-100',
     amber: 'bg-amber-50 text-amber-700 border-amber-100',
     violet: 'bg-violet-50 text-violet-700 border-violet-100',
   };
@@ -641,20 +667,37 @@ function VoteBar({ initial, final, topic, winner, showReason }) {
         <span className="text-slate-400">{final ? '最终票数' : '初始票数'}（共 100 人）</span>
         <span className="font-bold text-sky-600">{cur.neg} 反方</span>
       </div>
-      <div className="h-3 rounded-full overflow-hidden flex bg-slate-100">
-        <div className="bg-rose-400 h-full transition-all duration-700" style={{ width: cur.pos + '%' }} />
-        <div className="bg-sky-400 h-full transition-all duration-700" style={{ width: cur.neg + '%' }} />
-      </div>
+      {initial && final ? (() => {
+        const lo = Math.min(initial.pos, final.pos);
+        const hi = Math.max(initial.pos, final.pos);
+        const swing = hi - lo;
+        const posGained = final.pos > initial.pos;
+        const stripe = posGained
+          ? 'repeating-linear-gradient(45deg,#fb7185,#fb7185 5px,#fecdd3 5px,#fecdd3 10px)'
+          : 'repeating-linear-gradient(45deg,#38bdf8,#38bdf8 5px,#bae6fd 5px,#bae6fd 10px)';
+        return (
+          <div className="h-4 rounded-full overflow-hidden flex bg-slate-100" title={(posGained ? '正方' : '反方') + '跑票 +' + swing}>
+            <div className="bg-rose-400 h-full transition-all duration-700" style={{ width: lo + '%' }} />
+            {swing > 0 && <div className="h-full transition-all duration-700" style={{ width: swing + '%', background: stripe }} />}
+            <div className="bg-sky-400 h-full transition-all duration-700" style={{ width: (100 - hi) + '%' }} />
+          </div>
+        );
+      })() : (
+        <div className="h-4 rounded-full overflow-hidden flex bg-slate-100">
+          <div className="bg-rose-400 h-full transition-all duration-700" style={{ width: cur.pos + '%' }} />
+          <div className="bg-sky-400 h-full transition-all duration-700" style={{ width: cur.neg + '%' }} />
+        </div>
+      )}
       {initial && final && (
         <div className="mt-2 text-[11px] text-slate-500 flex items-center justify-center gap-2 flex-wrap">
           <span>初始 {initial.pos}:{initial.neg}</span>
           <ChevronRight className="w-3 h-3" />
           <span>最终 {final.pos}:{final.neg}</span>
-          {final.pos !== initial.pos && (
+          {final.pos !== initial.pos ? (
             <span className={'font-medium ' + (final.pos > initial.pos ? 'text-rose-600' : 'text-sky-600')}>
-              （{final.pos > initial.pos ? '正方' : '反方'}跑票 +{Math.abs(final.pos - initial.pos)}）
+              · 斜纹区 = 被说服改投{final.pos > initial.pos ? '正方' : '反方'}的 {Math.abs(final.pos - initial.pos)} 票
             </span>
-          )}
+          ) : <span className="text-slate-400">· 无人跑票</span>}
         </div>
       )}
       {showReason && cur.reason && (
@@ -744,7 +787,8 @@ function DebateReplay({ game, onClose }) {
         <div className="space-y-4">
           {(game.statements || []).length > 0 && <SectionCard icon={<Megaphone className="w-3.5 h-3.5" />} title="立论" tone="slate">{game.statements.map((s, i) => <SpeechRow key={i} s={s} debaters={debaters} />)}</SectionCard>}
           {(game.clash || []).length > 0 && <SectionCard icon={<Swords className="w-3.5 h-3.5" />} title="开杠 · 短兵相接" tone="fuchsia">{game.clash.map((s, i) => <SpeechRow key={i} s={s} debaters={debaters} compact />)}</SectionCard>}
-          {(game.closings || []).length > 0 && <SectionCard icon={<Flame className="w-3.5 h-3.5" />} title="结辩" tone="amber">{game.closings.map((s, i) => <SpeechRow key={i} s={s} debaters={debaters} closing />)}</SectionCard>}
+          {(game.bicker || []).length > 0 && <SectionCard icon={<Flame className="w-3.5 h-3.5" />} title="抬杠 · 全员混战" tone="orange">{game.bicker.map((s, i) => <SpeechRow key={i} s={s} debaters={debaters} compact />)}</SectionCard>}
+          {(game.closings || []).length > 0 && <SectionCard icon={<Quote className="w-3.5 h-3.5" />} title="结辩" tone="amber">{game.closings.map((s, i) => <SpeechRow key={i} s={s} debaters={debaters} closing />)}</SectionCard>}
           {(game.mentors || []).length > 0 && <SectionCard icon={<Mic className="w-3.5 h-3.5" />} title="导师点评" tone="violet">{game.mentors.map((m, i) => (
             <div key={i} className="flex gap-2.5"><div className="shrink-0 w-7 h-7 rounded-lg bg-violet-100 text-violet-700 flex items-center justify-center"><Mic className="w-3.5 h-3.5" /></div><div className="flex-1"><div className="text-xs text-violet-600 mb-0.5">导师 · {m.modelName || slotName(m.modelIndex)}</div><div className="text-sm text-slate-700 leading-relaxed">{m.text}</div></div></div>
           ))}</SectionCard>}
@@ -767,6 +811,7 @@ function phaseBanner(phase) {
     'pre-vote': { icon: '🗳️', label: '观众初投', cls: 'bg-slate-600' },
     'opening': { icon: '📣', label: '立论', cls: 'bg-slate-700' },
     'clash': { icon: '⚔️', label: '开杠', cls: 'bg-fuchsia-600' },
+    'bicker': { icon: '🥊', label: '抬杠混战', cls: 'bg-orange-600' },
     'closing': { icon: '🔥', label: '结辩', cls: 'bg-amber-600' },
     'mentor': { icon: '🎤', label: '导师点评', cls: 'bg-violet-600' },
     'post-vote': { icon: '🗳️', label: '观众终投', cls: 'bg-slate-600' },
@@ -860,6 +905,22 @@ function buildClashUser(d, topic, stmts, clashSoFar) {
   return ctx;
 }
 
+function buildBickerSystem(d, topic) {
+  const stance = d.side === 'pos' ? topic.pos : topic.neg;
+  return `《奇葩说》【抬杠】环节——全员混战、火力全开，最炸场的一轮。你是${sideLabel(d.side)}${roleLabel(d.pos)}，立场「${stance}」，辩题：${topic.q}？
+
+抓住对方任何一句话里的漏洞、矛盾或可笑之处，用**一句**最狠、最快、最有梗的话怼上去。可以毒舌、可以反讽、可以归谬、可以抓字眼，怎么炸怎么来——但只能一句。
+
+只输出一句话（就一句！），立刻开火，不要前缀、不要旁白。`;
+}
+function buildBickerUser(d, topic, stmts, clash, bickerSoFar) {
+  let ctx = '【双方立论要点】\n' + fmtSpeeches(stmts) + '\n\n';
+  if (clash.length) ctx += '【开杠交锋】\n' + fmtSpeeches(clash) + '\n\n';
+  if (bickerSoFar.length) ctx += '【正在混战】\n' + fmtSpeeches(bickerSoFar) + '\n\n';
+  ctx += '轮到你（' + sideLabel(d.side) + roleLabel(d.pos) + '）插一句最狠的，一句话开火。';
+  return ctx;
+}
+
 function buildClosingSystem(d, topic, isLast) {
   const stance = d.side === 'pos' ? topic.pos : topic.neg;
   const last = isLast
@@ -871,9 +932,10 @@ ${last}
 
 一段话（约 3-5 句），有逻辑、有情绪、奇葩说式的金句收尾。只输出陈词本身，不要前缀、不要旁白。`;
 }
-function buildClosingUser(d, topic, stmts, clash, clo) {
+function buildClosingUser(d, topic, stmts, clash, bicker, clo) {
   let ctx = '【全场立论】\n' + fmtSpeeches(stmts) + '\n\n';
   if (clash.length) ctx += '【开杠交锋】\n' + fmtSpeeches(clash) + '\n\n';
+  if (bicker && bicker.length) ctx += '【抬杠混战】\n' + fmtSpeeches(bicker) + '\n\n';
   if (clo.length) ctx += '【已结辩】\n' + fmtSpeeches(clo) + '\n\n';
   ctx += '轮到你（' + sideLabel(d.side) + roleLabel(d.pos) + '）结辩。';
   return ctx;
@@ -886,10 +948,11 @@ function buildMentorSystem(mi, topic) {
 
 一段话（2-4 句）。只输出点评本身，不要前缀、不要旁白。`;
 }
-function buildMentorUser(topic, stmts, clash, clo) {
+function buildMentorUser(topic, stmts, clash, bicker, clo) {
   let ctx = '【这场辩论】\n辩题：' + topic.q + '？（正方：' + topic.pos + ' / 反方：' + topic.neg + '）\n\n';
   ctx += '立论：\n' + fmtSpeeches(stmts) + '\n\n';
   if (clash.length) ctx += '开杠：\n' + fmtSpeeches(clash) + '\n\n';
+  if (bicker && bicker.length) ctx += '抬杠混战：\n' + fmtSpeeches(bicker) + '\n\n';
   if (clo.length) ctx += '结辩：\n' + fmtSpeeches(clo) + '\n\n';
   ctx += '请你点评。';
   return ctx;
@@ -922,11 +985,12 @@ function buildAudiencePostSystem(topic) {
 跑票原因：一句话说明哪些发言/哪一方造成了跑票。
 最佳辩手：正方/反方 + 一/二/三辩。`;
 }
-function buildAudiencePostUser(topic, initial, stmts, clash, clo) {
+function buildAudiencePostUser(topic, initial, stmts, clash, bicker, clo) {
   let ctx = '辩题：' + topic.q + '？（正方：' + topic.pos + ' / 反方：' + topic.neg + '）\n';
   ctx += '赛前观众投票：正方' + initial.pos + ' 反方' + initial.neg + '。\n\n';
   ctx += '【立论】\n' + fmtSpeeches(stmts) + '\n\n';
   if (clash.length) ctx += '【开杠】\n' + fmtSpeeches(clash) + '\n\n';
+  if (bicker && bicker.length) ctx += '【抬杠混战】\n' + fmtSpeeches(bicker) + '\n\n';
   if (clo.length) ctx += '【结辩】\n' + fmtSpeeches(clo) + '\n\n';
   ctx += '请给出最终投票分布、跑票原因、最佳辩手。';
   return ctx;
